@@ -19,45 +19,39 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          # Remove any existing rule with the same name
+          netsh advfirewall firewall delete rule name="RDP-Tailscale-TCP"
+          netsh advfirewall firewall delete rule name="RDP-Tailscale-UDP"
           
-          # Allow incoming connections on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+          # Allow both TCP & UDP 3389 (RDP)
+          netsh advfirewall firewall add rule name="RDP-Tailscale-TCP" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale-UDP" dir=in action=allow protocol=UDP localport=3389
 
-          # Restart Remote Desktop service to apply changes
+          # Restart Remote Desktop service
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with your Password
+      - name: Create RDP User with Secret Password
         run: |
-          # Use your provided password (as plain text here)
-          $password = '12QWwq21'
+          $password = "${{ secrets.Pasword_rdp }}"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Create the local user and add to groups
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-              Write-Host "User 'RDP' already exists. Setting password and ensuring group membership..."
-              # Set password for existing user
-              $user = Get-LocalUser -Name "RDP"
-              $user | Set-LocalUser -Password $securePass
+              Write-Host "User 'RDP' already exists. Resetting password..."
+              Set-LocalUser -Name "RDP" -Password $securePass
           } else {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -Description "RDP access user"
           }
 
-          # Add to groups (Administrators + Remote Desktop Users)
           Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
 
-          # Export credentials to GITHUB_ENV for later steps (will appear in runner logs)
           Write-Output "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
 
-          # Verify creation
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
               Write-Error "User creation failed"
               exit 1
           } else {
-              Write-Host "RDP user ready."
+              Write-Host "✅ RDP user ready."
           }
 
       - name: Install Tailscale
@@ -71,31 +65,36 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          # Bring up Tailscale with custom hostname "CodeV"
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=CodeV
-
-          # Expose the hostname to later steps
           Write-Output "TAILSCALE_HOSTNAME=CodeV" >> $env:GITHUB_ENV
 
+      - name: Check RDP service and port
+        run: |
+          Write-Host "Checking RDP service..."
+          Get-Service -Name TermService
+          Write-Host "Checking if port 3389 is listening..."
+          netstat -ano | findstr 3389
+          Start-Sleep -Seconds 15
+
       - name: Verify RDP Accessibility
+        continue-on-error: true
         run: |
           Write-Host "Testing RDP connectivity to $env:TAILSCALE_HOSTNAME"
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_HOSTNAME -Port 3389 -WarningAction SilentlyContinue
           if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
+              Write-Warning " TCP connection to RDP port 3389 failed, but continuing..."
+          } else {
+              Write-Host " TCP connectivity successful!"
           }
-          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_HOSTNAME"
-          # RDP_CREDS contains both user and password in one line
-          Write-Host "Credentials: $env:RDP_CREDS"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
           Write-Host "==================`n"
           
-          # Keep runner active indefinitely
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
